@@ -1,21 +1,20 @@
 {-
-- The CEK machine is an abstract machine that evaluates the simple untyped lambda calculus. Its
-- name is an acronym for the three elements that comprise its state: C for the lambda expression
-- to be evaluated, E for the environment, and K for the continuation. The environment represents
-- the bindings of variable names. The continuation is used to implement control flow.
+- The CESK machine is an extension of the CEK machine that adds a mutable store. Like the CEK
+- machine, the CESK machine also evaluates the simple untyped lambda  calculus.
 -
 - Author:  Ian Fisher (iafisher@protonmail.com)
 - Version: April 2019
 -}
 import Prelude hiding (lookup)
-import Data.Map (Map, empty, insert, lookup)
+import Data.Map (Map, empty, insert, lookup, size)
 import qualified Data.Map as Map
 
--- A CEK machine consists of an expression to be evaluated, an environment to evaluate it in,
--- and a continuation to execute next.
-data CEKMachine = CEKMachine {
+-- A CESK machine consists of an expression to be evaluated, an environment to evaluate it in,
+-- a mutable store, and a continuation to execute next.
+data CESKMachine = CESKMachine {
     expr :: Term,
     env :: Env,
+    store :: Store,
     kont :: Continuation
 } deriving (Show)
 
@@ -30,21 +29,28 @@ data Continuation = Ar Term Env Continuation | Fn Term Env Continuation | Halt d
 
 type Symbol = String
 type Value = (Term, Env)
-data Env = Env (Map Symbol Value) deriving (Show)
+type Address = Integer
+type Store = Map Address Value
+type Env = Map Symbol Address
 
 
 -- Step the machine once.
-step :: CEKMachine -> CEKMachine
+step :: CESKMachine -> CESKMachine
 step machine = case expr machine of
     -- If we have a symbol, we just look it up in the environment.
-    Sym s -> case envLookup s (env machine) of
-        Just (t, env0) -> CEKMachine { expr = t, env = env0, kont = kont machine }
-        Nothing -> error("undefined symbol")
+    Sym s -> case lookup s (env machine) of
+        Just addr -> case lookup addr (store machine) of
+            Just (t, env0) -> CESKMachine {
+                expr = t, env = env0, store = store machine, kont = kont machine
+            }
+            Nothing -> error("undefined symbol")
+        Nothing -> error("undefined address")
     -- If we have an application, we get ready to evaluate the function to be applied first, and
     -- we set up an Ar continuation to evaluate the argument next.
-    App e0 e1 -> CEKMachine {
+    App e0 e1 -> CESKMachine {
         expr = e0,
         env = env machine,
+        store = store machine,
         kont = Ar e1 (env machine) (kont machine)
     }
     v -> case kont machine of
@@ -52,34 +58,33 @@ step machine = case expr machine of
         -- application, and we've just finished evaluating the function to be applied.
         -- Therefore, we should evaluate the argument next (which is the first field of the
         -- continuation), and set the continuation to be Fn.
-        Ar e env0 kont -> CEKMachine {
+        Ar e env0 kont -> CESKMachine {
             expr = e,
             env = env0,
+            store = store machine,
             kont = Fn v env0 kont
         }
         -- If we have an Fn continuation, that means we are in the process of evaluating an
         -- application, and we've just finished evaluating the argument. Therefore, we should
         -- evaluate the body of the function next, with the parameter bound to the value of the
         -- argument.
-        Fn (Lambda x body) env0 kont -> CEKMachine {
+        Fn (Lambda x body) env0 kont -> CESKMachine {
             expr = body,
-            env = envInsert x (v, env machine) env0,
+            env = insert x (newAddress (store machine)) env0,
+            store = insert (newAddress (store machine)) (v, env machine) (store machine),
             kont = kont
         }
         Halt -> machine
 
 -- Step the machine until it reaches a halt configuration.
-stepUntilHalt :: CEKMachine -> CEKMachine
-stepUntilHalt m@(CEKMachine { expr = Lambda _ _, kont = Halt }) = m
+stepUntilHalt :: CESKMachine -> CESKMachine
+stepUntilHalt m@(CESKMachine { expr = Lambda _ _, kont = Halt }) = m
 stepUntilHalt m = stepUntilHalt (step m)
 
--- Utility functions for working with Env objects
-envLookup :: Symbol -> Env -> Maybe Value
-envLookup s (Env map) = lookup s map
-
-envInsert :: Symbol -> Value -> Env -> Env
-envInsert s v (Env map) = Env (insert s v map)
+-- Allocate a new address to be used for the store.
+newAddress :: Store -> Address
+newAddress s = toInteger (size s)
 
 -- (λx.x λy.y)
 t = App (Lambda "x" (Sym "x")) (Lambda "y" (Sym "y"))
-main = putStrLn (show (stepUntilHalt CEKMachine { expr = t, env = Env empty, kont = Halt }))
+main = putStrLn (show (stepUntilHalt CESKMachine { expr = t, env = empty, store = empty, kont = Halt }))
